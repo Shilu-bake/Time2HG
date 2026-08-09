@@ -6,7 +6,7 @@ import torch
 import os
 import pandas as pd
 
-from data.preprocessing import load_data, transfer_labels, k_fold
+from data.preprocessing import load_data, load_data_split, transfer_labels, k_fold
 from models.loss import cross_entropy, reconstruction_loss
 from sklearn.metrics import accuracy_score
 
@@ -20,9 +20,15 @@ def set_seed(args):
 
 
 def build_dataset(args):
-    sum_dataset, sum_target, num_classes = load_data(args.dataroot, args.dataset)
-    sum_target = transfer_labels(sum_target)
-    return sum_dataset, sum_target, num_classes
+    train_dataset, train_target, num_classes = load_data_split(args.dataroot, args.dataset, split='train')
+    test_dataset, test_target, _ = load_data_split(args.dataroot, args.dataset, split='test')
+
+    all_target = np.concatenate([train_target, test_target])
+    all_target = transfer_labels(all_target)
+    train_target = all_target[:len(train_target)]
+    test_target = all_target[len(train_target):]
+
+    return train_dataset, train_target, test_dataset, test_target, num_classes
 
 
 def build_loss(args):
@@ -32,8 +38,8 @@ def build_loss(args):
         return reconstruction_loss()
 
 
-def get_all_datasets(data, target):
-    return k_fold(data, target)
+def get_all_datasets(train_data, train_target, test_data, test_target):
+    return k_fold(train_data, train_target, test_data, test_target)
 
 
 def evaluate_model(val_loader, model, loss):

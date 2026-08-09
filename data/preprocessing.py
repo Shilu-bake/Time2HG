@@ -65,7 +65,7 @@ def transfer_labels(labels):
     return labels
 
 
-def k_fold(data, target):
+def k_fold(train_data, train_target, test_data, test_target):
     skf = StratifiedKFold(5, shuffle=True)
     train_sets = []
     train_targets = []
@@ -76,19 +76,15 @@ def k_fold(data, target):
     test_sets = []
     test_targets = []
 
-    for raw_index, test_index in skf.split(data, target):
-        raw_set = data[raw_index]
-        raw_target = target[raw_index]
+    for train_index, val_index in skf.split(train_data, train_target):
+        train_sets.append(train_data[train_index])
+        train_targets.append(train_target[train_index])
 
-        train_index, val_index = next(StratifiedKFold(4, shuffle=True).split(raw_set, raw_target))
-        train_sets.append(raw_set[train_index])
-        train_targets.append(raw_target[train_index])
+        val_sets.append(train_data[val_index])
+        val_targets.append(train_target[val_index])
 
-        val_sets.append(raw_set[val_index])
-        val_targets.append(raw_target[val_index])
-
-        test_sets.append(data[test_index])
-        test_targets.append(target[test_index])
+        test_sets.append(test_data)
+        test_targets.append(test_target)
 
     return train_sets, train_targets, val_sets, val_targets, test_sets, test_targets
 
