@@ -197,17 +197,17 @@ def main():
     device = torch.device(args.cuda if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
     
-    # 使用 build_dataset 分别加载训练集和测试集
-    print(f"\n正在加载数据集 {args.dataset} 的训练集和测试集...")
-    train_dataset, train_target, test_dataset, test_target, num_classes = build_dataset(args)
+    # 使用 build_dataset 构建整体数据集（用于k折）
+    print(f"\n正在加载数据集 {args.dataset} 并构建k折划分所需的整体数据...")
+    sum_dataset, sum_target, num_classes = build_dataset(args)
+    sum_target = transfer_labels(sum_target)
     args.num_experts = num_classes
 
-    # 获取序列长度（以训练集为准）
-    seq_len = train_dataset.shape[1]
-    
-    print(f"数据信息:")
-    print(f"  - 训练集样本数: {train_dataset.shape[0]}")
-    print(f"  - 测试集样本数: {test_dataset.shape[0]}")
+    # 获取序列长度（以整体数据为准）
+    seq_len = sum_dataset.shape[1]
+
+    print(f"整体数据信息:")
+    print(f"  - 总样本数: {sum_dataset.shape[0]}")
     print(f"  - 序列长度: {seq_len}")
     print(f"  - 类别数: {num_classes}")
     
@@ -238,13 +238,13 @@ def main():
         args.stride = args.shape_size
         print(f"  - 调整 stride 为: {args.stride}")
     
-    # ========== 批次大小配置（基于训练集）==========
-    print(f"\n基于训练集配置批次大小...")
-    args.batch_size = int(min(train_dataset.shape[0] * 0.6 / 10, 16))
+    # ========== 批次大小配置（基于整体数据）==========
+    print(f"\n基于整体数据配置批次大小...")
+    args.batch_size = int(min(sum_dataset.shape[0] * 0.6 / 10, 16))
 
     # 使用大批次加速训练（后续各折会复用该batch_size）
     if args.use_large_batch == 1:
-        args.batch_size = min(512, train_dataset.shape[0])
+        args.batch_size = min(512, sum_dataset.shape[0])
 
     print(f"\n批次大小配置:")
     print(f"  - use_large_batch: {args.use_large_batch}")
@@ -313,7 +313,7 @@ def main():
     # ========== 构建k折数据集 ==========
     print("\n构建5折 train/val/test 划分...")
     train_datasets, train_targets, val_datasets, val_targets, test_datasets, test_targets = get_all_datasets(
-        train_dataset, train_target, test_dataset, test_target
+        sum_dataset, sum_target
     )
 
     # 定义损失函数
