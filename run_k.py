@@ -81,7 +81,9 @@ def parse_args():
                         help='使用的GPU设备')
     parser.add_argument('--knn_k', type=int, default=8,
                         help='k-NN超边连接的最近邻数量（含中心节点自身）')
-    
+    parser.add_argument('--lr', type=float, default=0.001,
+                        help='学习率')
+
     return parser.parse_args()
 
 
@@ -168,8 +170,6 @@ def main():
     sum_dataset, sum_target, num_classes = build_dataset(args)
     sum_target = transfer_labels(sum_target)
     args.num_experts = num_classes
-    if not 1 <= args.moe_top_k <= args.num_experts:
-        raise ValueError(f"moe_top_k 必须在 1 到 {args.num_experts} 之间，当前值为 {args.moe_top_k}")
 
     # 获取序列长度（以整体数据为准）
     seq_len = sum_dataset.shape[1]
@@ -186,13 +186,24 @@ def main():
     args.shape_ratio = ucr_hyp_dict_shape_size[args.dataset]['shape_ratio']
     args.drop_out = ucr_hyp_dict_shape_size[args.dataset]['drop_out']
     args.warm_up_epoch = ucr_hyp_dict_shape_size[args.dataset]['warm_up_epoch']
-    
+    args.moe_top_k = ucr_hyp_dict_shape_size[args.dataset]['moe_top_k']
+    args.embed_dim = ucr_hyp_dict_shape_size[args.dataset]['embed_dim']
+    args.stride = ucr_hyp_dict_shape_size[args.dataset]['stride']
+    args.lr = ucr_hyp_dict_shape_size[args.dataset]['lr']
+
+    if not 1 <= args.moe_top_k <= args.num_experts:
+        raise ValueError(f"moe_top_k 必须在 1 到 {args.num_experts} 之间，当前值为 {args.moe_top_k}")
+
     print(f"数据集 {args.dataset} 的超参数配置:")
     print(f"  - shape_size: {args.shape_size}")
     print(f"  - shape_use_ratio: {args.shape_use_ratio}")
     print(f"  - shape_ratio: {args.shape_ratio}")
     print(f"  - drop_out: {args.drop_out}")
     print(f"  - warm_up_epoch: {args.warm_up_epoch}")
+    print(f"  - moe_top_k: {args.moe_top_k}")
+    print(f"  - embed_dim: {args.embed_dim}")
+    print(f"  - stride: {args.stride}")
+    print(f"  - lr: {args.lr}")
     
     # 如果使用比例模式，根据序列长度计算 shape_size
     if args.shape_use_ratio == 1:
@@ -289,7 +300,7 @@ def main():
         optimizer = torch.optim.Adam(
             list(shapelet_model.parameters()) +
             list(hgnnp_model.parameters()),
-            lr=0.001,
+            lr=args.lr,
             weight_decay=0.0
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
