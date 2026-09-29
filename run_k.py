@@ -4,7 +4,7 @@ UCR数据集的Shapelet Embedding提取和HGNNP训练脚本（无Segment向量�
 功能：
 1. 加载指定的UCR数据集训练集和测试集
 2. 对每个时序样本提取shapelet embeddings（使用学习模型）
-3. 基于时间邻近性构建二部图连接模式
+3. 基于特征空间k-NN构建二部图连接模式
 4. 使用HGNNP超图卷积增强shapelet特征
 5. 进行端到端训练和5折交叉验证
 """
@@ -29,10 +29,7 @@ from data.preprocessing import normalize_per_series, load_data, load_data_split,
 from data.shape_size_hyp import ucr_hyp_dict_shape_size
 
 # 导入模型类
-from Lab.lab_test import (
-    ShapeletBasedModel,
-    assign_temporal_shapelets
-)
+from Lab.lab_test import ShapeletBasedModel
 
 # 导入 HGNNP 超图卷积模块
 from Lab.hgnnp.HGNNP import HGNNPWrapper
@@ -64,7 +61,7 @@ def parse_args():
                         help='shapelet学习的深度')
     parser.add_argument('--num_experts', type=int, default=8, 
                         help='MoE专家数量（通常等于类别数）')
-    parser.add_argument('--sparse_rate', type=float, default=0.5, 
+    parser.add_argument('--sparse_rate', type=float, default=0.5,
                         help='最大稀疏率')
     parser.add_argument('--moe_loss_rate', type=float, default=0.003,
                         help='MoE损失权重')
@@ -80,56 +77,53 @@ def parse_args():
                         help='1 是 True，0 是 False，使用大批次加速训练')
     parser.add_argument('--cuda', type=str, default='cuda:0',
                         help='使用的GPU设备')
-    parser.add_argument('--temporal_window', type=float, default=2.0,
-                        help='时间邻近连接的窗口大小（将被转换为整数 segment 范围）')
+    parser.add_argument('--knn_k', type=int, default=8,
+                        help='k-NN超边连接的最近邻数量（含中心节点自身）')
     
     return parser.parse_args()
 
 
-def build_bipartite_graph_batch_temporal(shapelet_embeddings, 
-                                        temporal_connections, device):
+def build_bipartite_graph_batch_knn(shapelet_embeddings, k):
     """
-    基于时间邻近性构建二部图矩阵（用于端到端训练，无segment embeddings）
-    
+    基于特征空间 k-NN 构建二部图矩阵（用于端到端训练，无segment embeddings）
+
+    每个 shapelet token 作为一条超边的中心，连接其特征空间中 k 个最近邻 token。
+
     参数:
         shapelet_embeddings: tensor, shape=(batch_size, num_patches, embed_dim)
-        temporal_connections: List[List[int]], 预计算的时间邻近连接
-                             每个元素是一个 segment 连接的 shapelet 索引列表
-        device: torch 设备
-    
+        k: 每个超边连接的最近邻数量（含中心节点自身，因其距离为0）
+
     返回:
-        bipartite_matrix: tensor, shape=(batch_size, num_segments, num_patches)
-                         矩阵中的值为1表示该时间位置与该 shapelet 有连接（时间邻近）
+        bipartite_matrix: tensor, shape=(batch_size, num_patches, num_patches)
+                         第 i 行是以节点 i 为中心的超边，值为1表示该节点与超边连接
     """
     batch_size, num_patches, _ = shapelet_embeddings.shape
-    num_segments = len(temporal_connections)
-    
-    # 初始化全零矩阵
-    bipartite_matrix = torch.zeros(batch_size, num_segments, num_patches, device=device)
-    
-    # 根据预计算的时间连接填充（对整个 batch 使用相同的连接模式）
-    for seg_idx, connected_shapes in enumerate(temporal_connections):
-        for shape_idx in connected_shapes:
-            if shape_idx < num_patches:  # 边界检查
-                # 对 batch 中的所有样本使用相同的时间连接模式
-                bipartite_matrix[:, seg_idx, shape_idx] = 1.0
-    
+    k = min(k, num_patches)  # 稀疏化后 token 数可能小于 k
+
+    # 逐样本计算欧氏距离并取 top-k（索引是离散的，无需梯度）
+    with torch.no_grad():
+        dist = torch.cdist(shapelet_embeddings, shapelet_embeddings)  # (B, N, N)
+        knn_idx = dist.topk(k, dim=-1, largest=False).indices         # (B, N, k)
+
+    bipartite_matrix = shapelet_embeddings.new_zeros(batch_size, num_patches, num_patches)
+    bipartite_matrix.scatter_(2, knn_idx, 1.0)
+
     return bipartite_matrix
 
 
 def forward_pass(batch_data, shapelet_model, hgnnp_model,
-                 temporal_connections=None, epoch=None, warm_up_epoch=None):
+                 knn_k=8, epoch=None, warm_up_epoch=None):
     """
     统一的前向传播函数（训练、验证、测试共用）
-    
+
     参数:
         batch_data: (batch_size, in_chans, seq_len) - 输入时间序列
         shapelet_model: ShapeletBasedModel 实例
         hgnnp_model: HGNNPWrapper 实例
-        temporal_connections: List[List[int]], 预计算的时间邻近连接
+        knn_k: k-NN 超边连接的最近邻数量
         epoch: 当前训练轮数（训练和测试都应显式传入）
         warm_up_epoch: Warm-up 轮数
-    
+
     返回:
         logits: (batch_size, num_classes) - 分类 logits
         moe_loss: MoE 负载均衡损失（shapelet）
@@ -139,39 +133,9 @@ def forward_pass(batch_data, shapelet_model, hgnnp_model,
         batch_data, num_epoch_i=epoch, warm_up_epoch=warm_up_epoch
     )
 
-    # 基于原始 temporal_connections 和 index_map，为每个样本构建与稀疏化后序列对齐的二部图
-    batch_size = batch_data.shape[0]
-    num_segments = len(temporal_connections)
-    num_patches_final = shapelet_emb.shape[1]
+    # 在 MoE 学习后的特征空间上做 k-NN 构图，天然落在稀疏化后的 token 上，无需 index_map 重映射
+    bipartite_matrix = build_bipartite_graph_batch_knn(shapelet_emb, k=knn_k)
 
-    bipartite_matrix = torch.zeros(
-        batch_size, num_segments, num_patches_final, device=batch_data.device
-    )
-
-    # temporal_connections[seg] 中存的是原始 patch 索引（0..num_patches_initial-1）
-    # index_map[b, orig_idx] 给出该原始 patch 在最终序列中的位置（聚合到同一 token 的会映射到相同位置）
-    # 这里用向量化的方式，一次性为整个 batch 写入，避免 Python 的双重 for 循环
-    for seg_idx, connected_shapes in enumerate(temporal_connections):
-        if not connected_shapes:
-            continue
-
-        # (L,)
-        orig_idx_tensor = torch.as_tensor(
-            connected_shapes, device=batch_data.device, dtype=torch.long
-        )
-
-        # 对 batch 内每个样本，根据 index_map 计算映射后的索引 (B, L)
-        mapped_indices = index_map[:, orig_idx_tensor]  # (B, L)
-
-        # 构造 batch 维度索引 (B, L)
-        b_idx = torch.arange(batch_size, device=batch_data.device).unsqueeze(1).expand_as(mapped_indices)
-
-        # 构造 segment 维度索引 (B, L)，每个位置都是 seg_idx
-        seg_idx_tensor = torch.full_like(mapped_indices, seg_idx)
-
-        # 利用高级索引一次性写入 (将对应位置置为 1)
-        bipartite_matrix[b_idx, seg_idx_tensor, mapped_indices] = 1.0
-    
     # HGNNP 使用 MoE 学习后的 shapelet_emb 作为节点特征，且图结构与其索引严格对齐
     enhanced_emb = hgnnp_model(bipartite_matrix, shapelet_emb)
 
@@ -281,30 +245,13 @@ def main():
     print(f"  - Shapelet 大小: {args.shape_size}")
     print(f"  - 类别数: {num_classes}")
     
-    # ========== 预计算时间邻近连接（所有折共享）==========
-    print(f"\n预计算时间邻近连接...")
-    # 将传入的 temporal_window 浮点数四舍五入为整数，用于控制连接前后 N 个 segment 范围
-    temporal_window = int(round(args.temporal_window))
-    if temporal_window < 1:
-        temporal_window = 1
-    temporal_connections, num_segments, num_patches = assign_temporal_shapelets(
-        segment_size=args.shape_size,
-        shapelet_size=args.shape_size,
-        stride=args.stride,
-        seq_len=seq_len,
-        temporal_window=temporal_window,
-        device=device
-    )
-    
-    print(f"  - Segment 数量（时间位置数）: {num_segments}")
-    print(f"  - Shapelet 数量: {num_patches}")
-    print(f"  - 平均每个时间位置连接 {sum(len(c) for c in temporal_connections) / len(temporal_connections):.1f} 个 shapelet")
-    
-    # 打印连接统计
-    min_connections = min(len(c) for c in temporal_connections)
-    max_connections = max(len(c) for c in temporal_connections)
-    print(f"  - 最少连接数: {min_connections}, 最多连接数: {max_connections}")
-    print(f"  - 时间窗口原始输入: {args.temporal_window}, 实际使用整数: {temporal_window} 个 segment 范围")
+    # ========== 二部图构建方式：特征空间 k-NN ==========
+    # 图在每次前向传播中根据 MoE 学习后的 shapelet_emb 动态构建，
+    # 每个 token 作为一条超边中心连接其 k 个最近邻，无需预计算连接
+    num_patches = shapelet_model.shapelet_embed.num_patches
+    print(f"\n二部图构建: 特征空间 k-NN")
+    print(f"  - Shapelet 数量（稀疏化前）: {num_patches}")
+    print(f"  - 每条超边连接最近邻数 knn_k: {args.knn_k}（含中心节点自身）")
 
     # 保存初始权重，供每折复用
     shapelet_init_state = shapelet_model.state_dict()
@@ -418,15 +365,18 @@ def main():
 
                 logits, moe_loss = forward_pass(
                     batch_data, shapelet_model, hgnnp_model,
-                    temporal_connections=temporal_connections,
+                    knn_k=args.knn_k,
                     epoch=epoch, warm_up_epoch=args.warm_up_epoch
                 )
 
-                loss = criterion(logits, batch_labels)
+                cls_loss = criterion(logits, batch_labels)
+                loss = cls_loss
+                if moe_loss is not None:
+                    loss = loss + args.moe_loss_rate * moe_loss
                 loss.backward()
                 optimizer.step()
 
-                train_loss += loss.item()
+                train_loss += cls_loss.item()
                 _, predicted = logits.max(1)
                 train_total += batch_labels.size(0)
                 train_correct += predicted.eq(batch_labels).sum().item()
@@ -450,7 +400,7 @@ def main():
 
                     logits, moe_loss = forward_pass(
                         batch_data, shapelet_model, hgnnp_model,
-                        temporal_connections=temporal_connections,
+                        knn_k=args.knn_k,
                         epoch=epoch, warm_up_epoch=args.warm_up_epoch
                     )
 
@@ -477,7 +427,7 @@ def main():
 
                         logits, moe_loss = forward_pass(
                             batch_data, shapelet_model, hgnnp_model,
-                            temporal_connections=temporal_connections,
+                            knn_k=args.knn_k,
                             epoch=epoch, warm_up_epoch=args.warm_up_epoch
                         )
 

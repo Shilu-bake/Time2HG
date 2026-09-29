@@ -111,7 +111,8 @@ class MoE_Block(nn.Module):
         self.k = k
 
         self.experts = nn.ModuleList([MLP(self.input_size, self.output_size, self.hidden_size) for i in range(self.num_experts)])
-        self.w_gate = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
+        self.w_gate = nn.Parameter(torch.empty(input_size, num_experts))
+        nn.init.normal_(self.w_gate, std=0.02)
         self.rmsnorm = RMSNorm(dim=self.output_size)
         self.act = nn.GELU()
 
@@ -137,22 +138,25 @@ class MoE_Block(nn.Module):
         top_logits, top_indices = logits.topk(min(self.k + 1, self.num_experts), dim=1)
         top_k_logits = top_logits[:, :self.k]
         top_k_indices = top_indices[:, :self.k]
-        top_k_gates = top_k_logits / (top_k_logits.sum(1, keepdim=True) + 1e-6)  # normalization
+        if self.k == 1:
+            top_k_gates = top_k_logits / top_k_logits.detach().clamp_min(1e-6)
+        else:
+            top_k_gates = top_k_logits / (top_k_logits.sum(1, keepdim=True) + 1e-6)  # normalization
 
         zeros = torch.zeros_like(logits, requires_grad=True)
         gates = zeros.scatter(1, top_k_indices, top_k_gates)
         load = self._gates_to_load(gates)
       
-        return gates, load
+        return gates, load, logits
 
     def forward(self, x):
         batch_size, num_patches, feature_size = x.shape  # x: (batch_size, num_patches, input_size)
         x_flat = x.reshape(batch_size * num_patches, feature_size)  # Flatten patches for processing
-        gates, load = self.top_k_gating(x_flat)
+        gates, load, probabilities = self.top_k_gating(x_flat)
 
         # calculate importance loss
-        importance = gates.sum(0)
-        loss = self.cv_squared(importance) + self.cv_squared(load)
+        importance = probabilities.mean(0)
+        loss = self.num_experts * (importance * (load.detach() / x_flat.size(0))).sum()
 
         dispatcher = SparseDispatcher(self.num_experts, gates)
         expert_inputs = dispatcher.dispatch(x_flat)
