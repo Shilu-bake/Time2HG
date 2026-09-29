@@ -96,7 +96,8 @@ class ShapeletBasedModel(nn.Module):
     - Warm-up 渐进式训练
     """
     def __init__(self, seq_len, shape_size=8, in_chans=1, embed_dim=128, 
-                 stride=4, depth=2, num_experts=8, sparse_rate=0.5, num_classes=None,use_head = False):
+                 stride=4, depth=2, num_experts=8, sparse_rate=0.5, num_classes=None,use_head = False,
+                 moe_top_k=1):
         """
         参数:
             seq_len: 时间序列长度
@@ -106,6 +107,7 @@ class ShapeletBasedModel(nn.Module):
             stride: 滑动窗口步长
             depth: 学习层深度
             num_experts: MoE 专家数量（通常等于类别数）
+            moe_top_k: 每个 token 激活的 MoE 专家数量
             sparse_rate: 最大稀疏率（最后一层的稀疏程度）
             num_classes: 类别数（如果提供，则添加分类头；否则仅做特征提取）
         """
@@ -163,7 +165,8 @@ class ShapeletBasedModel(nn.Module):
                 input_size=embed_dim,
                 output_size=embed_dim,
                 num_experts=num_experts,
-                hidden_size=embed_dim
+                hidden_size=embed_dim,
+                k=moe_top_k
             )
             for _ in range(depth)
         ])

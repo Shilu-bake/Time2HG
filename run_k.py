@@ -61,7 +61,9 @@ def parse_args():
                         help='shapelet学习的深度')
     parser.add_argument('--num_experts', type=int, default=8, 
                         help='MoE专家数量（通常等于类别数）')
-    parser.add_argument('--sparse_rate', type=float, default=0.5,
+    parser.add_argument('--moe_top_k', type=int, default=1,
+                        help='每个token激活的MoE专家数量')
+    parser.add_argument('--sparse_rate', type=float, default=0.2,
                         help='最大稀疏率')
     parser.add_argument('--moe_loss_rate', type=float, default=0.003,
                         help='MoE损失权重')
@@ -166,6 +168,8 @@ def main():
     sum_dataset, sum_target, num_classes = build_dataset(args)
     sum_target = transfer_labels(sum_target)
     args.num_experts = num_classes
+    if not 1 <= args.moe_top_k <= args.num_experts:
+        raise ValueError(f"moe_top_k 必须在 1 到 {args.num_experts} 之间，当前值为 {args.moe_top_k}")
 
     # 获取序列长度（以整体数据为准）
     seq_len = sum_dataset.shape[1]
@@ -227,6 +231,7 @@ def main():
         stride=args.stride,
         depth=args.depth,
         num_experts=args.num_experts,
+        moe_top_k=args.moe_top_k,
         sparse_rate=args.sparse_rate,
         num_classes=num_classes  # 添加分类头
     ).to(device)
